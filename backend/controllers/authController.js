@@ -1,0 +1,184 @@
+const User = require("../models/UserModel");
+const Subject = require("../models/studentsubjectsModel");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+const verifyToken = require('../middleware/authMiddleware')
+const mongoose = require("mongoose");
+// Show Register Form
+exports.registerForm = (req, res) => {
+  res.render("auth/register", { title: "Register", layout: "auth" });
+};
+
+
+// Handle Register (React API version)
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password, userType } = req.body;
+
+    // ✅ Check existing user
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "User already exists!"
+      });
+    }
+
+    // ✅ Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // ✅ Save user
+    const newUser = new User({ name, email, password: hashedPassword, userType });
+    const savedUser = await newUser.save();
+
+    // ✅ If STUDENT, create subject document
+    if (userType === "STUDENT") {
+      const newSubject = new Subject({
+        user_id: savedUser._id
+      });
+      await newSubject.save();
+    }
+
+    // ✅ Respond to React frontend
+    return res.status(201).json({
+      success: true,
+      message: "Registration successful , Please login now.",
+      user: {
+        id: savedUser._id,
+        name: savedUser.name,
+        email: savedUser.email,
+        userType: savedUser.userType
+      }
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong, please try again."
+    });
+  }
+};
+
+// Middleware to check authentication
+exports.loginForm = (req, res) => {
+  res.render("auth/login", { title: "Login", layout: "auth" });
+};
+
+// Handle login
+exports.login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // ✅ Validate input
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: "Email and password are required" });
+    }
+
+    // ✅ Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(401).json({ success: false, message: "Invalid email or password" });
+    }
+
+    // ✅ Check password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: "Invalid email or password" });
+    }
+
+    // ✅ Generate JWT
+    const token = jwt.sign(
+      { id: user._id, role: user.userType, name: user.name },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+let response = {
+  token: token,
+  userdetails : user
+}
+
+console.log('response -- >', response);
+
+    // ✅ Send JSON response to React
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      response
+    });
+
+  } catch (err) {
+    console.error("Login Error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error. Please try again."
+    });
+  }
+};
+
+exports.dashboard = async (req, res) => {
+  try {
+    console.log("userpayload -->", req.user);
+
+    const users = await User.find();
+    const studentsCount = users.filter(u => u.userType === "STUDENT").length;
+    const teachersCount = users.filter(u => u.userType === "TEACHER").length;
+
+    let studentsWithSubjects = [];
+
+    if (req.user.role === "STUDENT") {
+      studentsWithSubjects = await User.aggregate([
+        {
+          $match: {
+            userType: "STUDENT",
+            _id: new mongoose.Types.ObjectId(req.user.id),
+          },
+        },
+        {
+          $lookup: {
+            from: "subjects", // MongoDB collection name
+            localField: "_id",
+            foreignField: "user_id",
+            as: "subjects",
+          },
+        },
+        {
+          $unwind: {
+            path: "$subjects",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+      ]);
+    }
+
+    console.log("studentsWithSubjects -->", studentsWithSubjects);
+
+    // ✅ Respond as JSON instead of rendering a view
+    return res.status(200).json({
+      success: true,
+      message: "Dashboard data fetched successfully",
+      data: {
+        user: req.user,
+        stats: {
+          students: studentsCount,
+          teachers: teachersCount,
+        },
+        students: studentsWithSubjects || [],
+      },
+    });
+  } catch (error) {
+    console.error("Dashboard error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch dashboard data",
+      error: error.message,
+    });
+  }
+};
+
+// Logout
+exports.logout = (req, res) => {
+  res.clearCookie("token");  // if JWT stored in cookies
+  res.redirect("/");         // back to login
+};
